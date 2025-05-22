@@ -1,0 +1,33 @@
+- name: image-builder
+  image: gcr.io/kaniko-project/executor:latest
+  env:
+    - name: BUILD_CONTEXT_URL
+      value: "" # Placeholder, to be provided at runtime
+    - name: DOCKERFILE_PATH
+      value: "Dockerfile" # Default value
+    - name: BUILD_IMAGE_NAME
+      value: "" # Placeholder, to be provided at runtime
+    - name: BUILD_IMAGE_TAG
+      value: "" # Placeholder, to be provided at runtime
+  command:
+    - /bin/sh
+    - -c
+    - |
+      set -e
+      echo "Creating temporary workspace..."
+      mkdir -p /workspace/context
+
+      echo "Downloading build context from $BUILD_CONTEXT_URL..."
+      wget -O /workspace/context.tar.gz "$BUILD_CONTEXT_URL"
+
+      echo "Extracting build context..."
+      tar -xzf /workspace/context.tar.gz -C /workspace/context/
+
+      echo "Building Docker image..."
+      /kaniko/executor \
+        --context /workspace/context \
+        --dockerfile /workspace/context/${DOCKERFILE_PATH} \
+        --destination ${BUILD_IMAGE_NAME}:${BUILD_IMAGE_TAG} \
+        --tarPath /workspace/image.tar # Output image as a tarball for now
+      
+      echo "Image built and saved to /workspace/image.tar"

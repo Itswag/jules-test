@@ -1,0 +1,143 @@
+kind: Job
+apiVersion: batch/v1
+metadata:
+  name: build-and-push-job
+  namespace: default
+spec:
+  parallelism: 1
+  completions: 1
+  activeDeadlineSeconds: 3600 # Consider making this configurable or longer for builds
+  backoffLimit: 1
+  template:
+    spec:
+      containers:
+        - name: image-builder
+          image: gcr.io/kaniko-project/executor:latest
+          env:
+            - name: JOB_TYPE
+              value: "build_and_push" # or "push_tar"
+            - name: INTERMEDIATE_REGISTRY_URL
+              value: "docker-registry.default.svc.cluster.local:5000" # Example intermediate registry
+            - name: BUILD_CONTEXT_URL
+              value: "http://example.com/my-app-context.tar.gz"
+            - name: DOCKERFILE_PATH
+              value: "Dockerfile" 
+            - name: BUILD_IMAGE_NAME
+              value: "my-app-built"
+            - name: BUILD_IMAGE_TAG
+              value: "latest"
+            - name: IMAGE_TAR_URL # Added for consistency, not used by image-builder
+              value: "http://example.com/image.tar"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -euo pipefail
+              echo "Current JOB_TYPE: ${JOB_TYPE}"
+
+              if [ "${JOB_TYPE}" = "push_tar" ]; then
+                echo "JOB_TYPE is push_tar, image-builder skipping."
+                exit 0
+              fi
+
+              echo "JOB_TYPE is build_and_push, proceeding with image build..."
+              echo "Creating temporary workspace..."
+              mkdir -p /workspace/context
+
+              echo "Downloading build context from $BUILD_CONTEXT_URL..."
+              # Adding --no-check-certificate for flexibility, consider security implications
+              wget --no-check-certificate -O /workspace/context.tar.gz "$BUILD_CONTEXT_URL"
+
+              echo "Extracting build context..."
+              tar -xzf /workspace/context.tar.gz -C /workspace/context/
+
+              echo "Building Docker image..."
+              /kaniko/executor \
+                --context dir:///workspace/context \
+                --dockerfile /workspace/context/${DOCKERFILE_PATH:-Dockerfile} \
+                --destination ${INTERMEDIATE_REGISTRY_URL}/${BUILD_IMAGE_NAME}:${BUILD_IMAGE_TAG} \
+                --skip-tls-verify-registry=${INTERMEDIATE_REGISTRY_URL}
+              
+              echo "Image built and pushed to intermediate registry ${INTERMEDIATE_REGISTRY_URL}/${BUILD_IMAGE_NAME}:${BUILD_IMAGE_TAG}"
+          imagePullPolicy: IfNotPresent
+
+        - name: skopeo-pusher
+          image: quay.io/skopeo/skopeo:latest 
+          env:
+            - name: JOB_TYPE
+              value: "build_and_push" # or "push_tar"
+            - name: IMAGE_TAR_URL
+              value: "http://example.com/image.tar"
+            - name: INTERMEDIATE_REGISTRY_URL
+              value: "docker-registry.default.svc.cluster.local:5000" # Example intermediate registry
+            - name: BUILD_IMAGE_NAME # Used for build_and_push
+              value: "my-app-built"
+            - name: BUILD_IMAGE_TAG # Used for build_and_push
+              value: "latest"
+            - name: HARBOR_REGISTRY
+              value: "dockerhub.kubekey.local"
+            - name: HARBOR_PROJECT
+              value: "user/cve"
+            - name: HARBOR_IMAGE_NAME
+              value: "my-app-final" 
+            - name: HARBOR_IMAGE_TAG
+              value: "v1.2.3"
+            # The following credentials should be stored in a Kubernetes Secret named 'harbor-credentials'
+            # with keys 'username' and 'password' in the same namespace as this Job.
+            # Example Secret YAML:
+            # apiVersion: v1
+            # kind: Secret
+            # metadata:
+            #   name: harbor-credentials
+            #   namespace: default # Or your Job's namespace
+            # type: Opaque
+            # data:
+            #   username: <base64_encoded_username>
+            #   password: <base64_encoded_password>
+            - name: HARBOR_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: harbor-credentials
+                  key: username
+            - name: HARBOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: harbor-credentials
+                  key: password
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -euo pipefail
+              echo "Current JOB_TYPE: ${JOB_TYPE}"
+
+              if [ "${JOB_TYPE}" = "push_tar" ]; then
+                echo "JOB_TYPE is push_tar, skopeo-pusher downloading and pushing tar."
+                echo "Downloading image tar from $IMAGE_TAR_URL..."
+                # Ensure curl is available in the skopeo image; use wget as alternative if needed
+                # For skopeo official images, curl is usually available.
+                curl -L -o /tmp/image.tar "$IMAGE_TAR_URL"
+                echo "Pushing image tarball to Harbor..."
+                skopeo copy \
+                  --dest-tls-verify=false \
+                  --dest-creds="${HARBOR_USERNAME}:${HARBOR_PASSWORD}" \
+                  "docker-archive:/tmp/image.tar" \
+                  "docker://${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${HARBOR_IMAGE_NAME}:${HARBOR_IMAGE_TAG}"
+              else
+                echo "JOB_TYPE is build_and_push, skopeo-pusher pulling from intermediate and pushing to Harbor..."
+                skopeo copy \
+                  --src-tls-verify=false \
+                  --dest-tls-verify=false \
+                  --dest-creds="${HARBOR_USERNAME}:${HARBOR_PASSWORD}" \
+                  "docker://${INTERMEDIATE_REGISTRY_URL}/${BUILD_IMAGE_NAME}:${BUILD_IMAGE_TAG}" \
+                  "docker://${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${HARBOR_IMAGE_NAME}:${HARBOR_IMAGE_TAG}"
+              fi
+              
+              echo "Image processed and pushed to Harbor successfully."
+          imagePullPolicy: IfNotPresent
+          
+      restartPolicy: Never
+      hostNetwork: true # Kept as per original spec
+      # Consider adding imagePullSecrets if images are from private registries
+      # imagePullSecrets:
+      #   - name: my-registry-secret
