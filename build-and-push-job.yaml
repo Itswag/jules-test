@@ -26,8 +26,6 @@ spec:
               value: "my-app-built"
             - name: BUILD_IMAGE_TAG
               value: "latest"
-            - name: IMAGE_TAR_URL # Added for consistency, not used by image-builder
-              value: "http://example.com/image.tar"
           command:
             - /bin/sh
             - -c
